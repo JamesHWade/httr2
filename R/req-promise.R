@@ -80,19 +80,7 @@ req_perform_promise <- function(
   check_string(path, allow_null = TRUE)
   verbosity <- verbosity %||% httr2_verbosity()
   mock <- as_mock_function(mock)
-
-  if (missing(pool)) {
-    if (!identical(later::current_loop(), later::global_loop())) {
-      cli::cli_abort(c(
-        "Must supply {.arg pool} when calling {.code later::with_temp_loop()}.",
-        i = "Do you need {.code pool = curl::new_pool()}?"
-      ))
-    }
-  } else {
-    if (!is.null(pool) && !inherits(pool, "curl_multi")) {
-      stop_input_type(pool, "a {curl} pool", allow_null = TRUE)
-    }
-  }
+  check_promise_pool(pool, missing(pool))
   # verbosity checked by req_verbosity
   req <- req_verbosity(req, verbosity)
 
@@ -110,6 +98,22 @@ req_perform_promise <- function(
   })
 }
 
+check_promise_pool <- function(pool, missing_pool, call = caller_env()) {
+  if (missing_pool) {
+    if (!identical(later::current_loop(), later::global_loop())) {
+      cli::cli_abort(
+        c(
+          "Must supply {.arg pool} when calling {.code later::with_temp_loop()}.",
+          i = "Do you need {.code pool = curl::new_pool()}?"
+        ),
+        call = call
+      )
+    }
+  } else if (!is.null(pool) && !inherits(pool, "curl_multi")) {
+    stop_input_type(pool, "a {curl} pool", allow_null = TRUE, call = call)
+  }
+}
+
 ensure_pool_poller <- function(pool) {
   key <- obj_address(pool)
   wake <- the$pool_pollers[[key]]
@@ -124,6 +128,7 @@ ensure_pool_poller <- function(pool) {
     withCallingHandlers(
       {
         curl::multi_run(0, pool = pool)
+        pool_run_watchers(pool)
         # A completion callback may have added another handle.
         if (length(curl::multi_list(pool = pool)) > 0) {
           fds <- curl::multi_fdset(pool = pool)
@@ -141,6 +146,7 @@ ensure_pool_poller <- function(pool) {
         }
       },
       error = function(cnd) {
+        pool_clear_watchers(pool)
         env_unbind(the$pool_pollers, key)
       }
     )
@@ -160,4 +166,36 @@ ensure_pool_poller <- function(pool) {
     alive
   }
   poll_pool()
+}
+
+# Watchers are functions called each time the poller has run the pool, for
+# things that curl doesn't provide a callback for. A watcher returns `TRUE`
+# once it's finished and no longer needs to be called.
+pool_add_watcher <- function(pool, watcher) {
+  key <- obj_address(pool)
+  the$pool_watchers[[key]] <- c(the$pool_watchers[[key]], list(watcher))
+  invisible()
+}
+
+pool_run_watchers <- function(pool) {
+  key <- obj_address(pool)
+  watchers <- the$pool_watchers[[key]]
+  if (length(watchers) == 0) {
+    return(invisible())
+  }
+
+  pool_clear_watchers(pool)
+  finished <- map_lgl(watchers, function(watcher) {
+    tryCatch(isTRUE(watcher()), error = function(cnd) TRUE)
+  })
+  # A watcher might have added new watchers
+  remaining <- c(watchers[!finished], the$pool_watchers[[key]])
+  if (length(remaining) > 0) {
+    the$pool_watchers[[key]] <- remaining
+  }
+  invisible()
+}
+
+pool_clear_watchers <- function(pool) {
+  env_unbind(the$pool_watchers, obj_address(pool))
 }
