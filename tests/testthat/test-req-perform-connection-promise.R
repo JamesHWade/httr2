@@ -101,9 +101,11 @@ test_that("can wait for data with get_fdset()", {
   withr::defer(close(resp))
 
   bytes <- raw()
+  n_reads <- integer()
   while (!resp_stream_is_complete(resp)) {
     bytes <- c(bytes, resp_stream_raw(resp))
     fds <- resp$body$get_fdset()
+    n_reads <- c(n_reads, length(fds$reads))
     wait <- promises::promise(function(resolve, reject) {
       later::later_fd(
         resolve,
@@ -116,6 +118,7 @@ test_that("can wait for data with get_fdset()", {
     await_promise(wait, timeout = 5)
   }
   expect_length(bytes, 5)
+  expect_gt(max(n_reads), 0)
 })
 
 test_that("handles empty bodies", {
@@ -193,6 +196,16 @@ test_that("close() cancels an in-flight transfer", {
   expect_snapshot(resp_stream_raw(resp), error = TRUE)
 })
 
+test_that("close() stops the pool poller", {
+  pool <- curl::new_pool()
+  req <- request_test("/drip?duration=5&numbytes=5")
+  resp <- await_promise(req_perform_connection_promise(req, pool = pool))
+
+  close(resp)
+  later::run_now()
+  expect_null(the$pool_pollers[[obj_address(pool)]])
+})
+
 test_that("dropping an unclosed response cancels the transfer", {
   pool <- curl::new_pool()
   req <- request_test("/drip?duration=5&numbytes=5")
@@ -206,6 +219,55 @@ test_that("dropping an unclosed response cancels the transfer", {
   gc()
   later::run_now()
   expect_length(curl::multi_list(pool), 0)
+})
+
+test_that("dropping an unclosed response in a temporary loop cancels on that loop", {
+  pool <- curl::new_pool()
+  req <- request_test("/drip?duration=5&numbytes=5")
+
+  later::with_temp_loop({
+    resp <- await_promise(req_perform_connection_promise(req, pool = pool))
+    expect_length(curl::multi_list(pool), 1)
+
+    rm(resp)
+    the$last_response <- NULL
+    later::run_now()
+    gc()
+    later::run_now()
+    expect_length(curl::multi_list(pool), 0)
+    later::run_now()
+    expect_null(the$pool_pollers[[obj_address(pool)]])
+  })
+
+  # Falls back to the global loop once the poller's loop is destroyed
+  later::with_temp_loop({
+    resp <- await_promise(req_perform_connection_promise(req, pool = pool))
+    later::run_now()
+  })
+  expect_length(curl::multi_list(pool), 1)
+
+  rm(resp)
+  the$last_response <- NULL
+  gc()
+  later::run_now()
+  expect_length(curl::multi_list(pool), 0)
+})
+
+test_that("done policy runs once when a dropped response completes", {
+  pool <- curl::new_pool()
+  n_done <- 0
+  req <- request_test("/drip?duration=0.2&numbytes=2") |>
+    req_policies(done = function() n_done <<- n_done + 1)
+  resp <- await_promise(req_perform_connection_promise(req, pool = pool))
+
+  rm(resp)
+  the$last_response <- NULL
+  later::run_now()
+  gc()
+  # Finish the transfer before the deferred cancel gets to run
+  curl::multi_run(pool = pool)
+  later::run_now()
+  expect_equal(n_done, 1)
 })
 
 test_that("can start a new request after closing another", {

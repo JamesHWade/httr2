@@ -1,6 +1,6 @@
 # Cancelling isn't possible while curl is running a callback, and garbage
 # collection can happen at any time, so finalizers must defer it.
-multi_cancel_later <- function(handle, on_cancel = NULL) {
+multi_cancel_later <- function(handle, on_cancel = NULL, loop = NULL) {
   cancel <- function() {
     # The handle might have been finalized along with the body
     tryCatch(curl::multi_cancel(handle), error = function(cnd) NULL)
@@ -8,7 +8,10 @@ multi_cancel_later <- function(handle, on_cancel = NULL) {
       on_cancel()
     }
   }
-  later::later(cancel, loop = later::global_loop())
+  if (is.null(loop) || !later::exists_loop(loop)) {
+    loop <- later::global_loop()
+  }
+  later::later(cancel, loop = loop)
   invisible()
 }
 
@@ -43,22 +46,26 @@ MultiStreamingBody <- R6::R6Class(
       }
 
       n <- min(n, private$n_buffered)
+      # Modify a local copy: assigning through `private` copies the list
+      chunks <- private$chunks
+      private$chunks <- NULL
       out <- vector("list", 0)
       needed <- n
       while (needed > 0) {
-        chunk <- private$chunks[[private$head]]
+        chunk <- chunks[[private$head]]
         available <- length(chunk) - private$offset
         take <- min(available, needed)
         out[[length(out) + 1L]] <- chunk[private$offset + seq_len(take)]
         needed <- needed - take
         if (take == available) {
-          private$chunks[private$head] <- list(NULL)
+          chunks[private$head] <- list(NULL)
           private$head <- private$head + 1L
           private$offset <- 0L
         } else {
           private$offset <- private$offset + take
         }
       }
+      private$chunks <- chunks
       private$n_buffered <- private$n_buffered - n
       private$compact()
 
@@ -68,7 +75,7 @@ MultiStreamingBody <- R6::R6Class(
     # Waits for the transfer to finish, rather than spinning on read()
     read_all = function(buffer = 32 * 1024) {
       while (!private$complete && !private$closed) {
-        curl::multi_run(timeout = 0.1, pool = private$pool)
+        curl::multi_run(timeout = 0.1, poll = TRUE, pool = private$pool)
       }
       super$read_all(buffer)
     },
@@ -116,7 +123,11 @@ MultiStreamingBody <- R6::R6Class(
       if (private$closed || length(bytes) == 0) {
         return(invisible())
       }
-      private$chunks[[length(private$chunks) + 1L]] <- bytes
+      # Modify a local copy: assigning through `private` copies the list
+      chunks <- private$chunks
+      private$chunks <- NULL
+      chunks[[length(chunks) + 1L]] <- bytes
+      private$chunks <- chunks
       private$n_buffered <- private$n_buffered + length(bytes)
       invisible()
     },
@@ -143,7 +154,11 @@ MultiStreamingBody <- R6::R6Class(
 
     finalize = function() {
       if (!private$complete && !private$closed) {
-        multi_cancel_later(private$handle, private$on_cancel)
+        multi_cancel_later(
+          private$handle,
+          private$on_cancel,
+          loop = pool_poller_loop(private$pool)
+        )
       }
     },
 

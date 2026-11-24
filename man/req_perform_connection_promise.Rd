@@ -48,8 +48,10 @@ stays responsive while waiting for the server to respond. The promise
 resolves to a streaming \link{response} as soon as the response headers have
 been received. You can then use \code{\link[=resp_stream_raw]{resp_stream_raw()}}, \code{\link[=resp_stream_lines]{resp_stream_lines()}},
 \code{\link[=resp_stream_sse]{resp_stream_sse()}}, or \code{\link[=resp_stream_aws]{resp_stream_aws()}} to read the body. Reads never
-block: if no data is available yet, they return an empty result. Always
-finish up by calling \code{close(response)}.
+block: if no data is available yet, they return an empty result. Functions
+that read the whole body, such as \code{\link[=resp_body_string]{resp_body_string()}}, wait for the
+transfer to finish and block the event loop while they wait. Always finish
+up by calling \code{close(response)}.
 
 Unlike \code{\link[=req_perform_connection]{req_perform_connection()}}, the body is received in the background
 as fast as the server sends it and is held in memory until you read it. If

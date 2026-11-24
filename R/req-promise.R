@@ -152,7 +152,7 @@ ensure_pool_poller <- function(pool) {
     )
   }
 
-  the$pool_pollers[[key]] <- function() {
+  wake <- function() {
     alive <- later::exists_loop(loop)
     if (!is.null(cancel_wait)) {
       cancel_wait()
@@ -165,7 +165,25 @@ ensure_pool_poller <- function(pool) {
     # was destroyed, let the caller start a new poller on the current loop.
     alive
   }
+  attr(wake, "loop") <- loop
+  the$pool_pollers[[key]] <- wake
   poll_pool()
+}
+
+# Lets a running poller notice that its pool has changed
+pool_wake_poller <- function(pool) {
+  wake <- the$pool_pollers[[obj_address(pool)]]
+  if (!is.null(wake)) {
+    wake()
+  }
+  invisible()
+}
+
+pool_poller_loop <- function(pool) {
+  wake <- the$pool_pollers[[obj_address(pool)]]
+  if (!is.null(wake)) {
+    attr(wake, "loop")
+  }
 }
 
 # Watchers are functions called each time the poller has run the pool, for

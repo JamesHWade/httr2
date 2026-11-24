@@ -9,8 +9,10 @@
 #' resolves to a streaming [response] as soon as the response headers have
 #' been received. You can then use [resp_stream_raw()], [resp_stream_lines()],
 #' [resp_stream_sse()], or [resp_stream_aws()] to read the body. Reads never
-#' block: if no data is available yet, they return an empty result. Always
-#' finish up by calling `close(response)`.
+#' block: if no data is available yet, they return an empty result. Functions
+#' that read the whole body, such as [resp_body_string()], wait for the
+#' transfer to finish and block the event loop while they wait. Always finish
+#' up by calling `close(response)`.
 #'
 #' Unlike [req_perform_connection()], the body is received in the background
 #' as fast as the server sends it and is held in memory until you read it. If
@@ -104,12 +106,22 @@ connection_promise_submit <- function(req, pool, resolve, reject, error_call) {
   the$last_response <- NULL
   signal(class = "httr2_perform_connection")
 
+  # The transfer can finish after a dropped body has scheduled its cancel
+  completed <- FALSE
+  complete <- function() {
+    if (!completed) {
+      completed <<- TRUE
+      req_completed(req_prep)
+    }
+  }
+
   body <- MultiStreamingBody$new(
     handle,
     pool,
     on_cancel = function() {
-      req_completed(req_prep)
+      complete()
       req_record_span_status(req_prep)
+      pool_wake_poller(pool)
     }
   )
   weak_body <- new_weakref(body)
@@ -183,7 +195,7 @@ connection_promise_submit <- function(req, pool, resolve, reject, error_call) {
   }
 
   on_done <- function(curl_data) {
-    req_completed(req_prep)
+    complete()
     body <- get_body()
     if (!is.null(body)) {
       body$finish()
@@ -208,7 +220,7 @@ connection_promise_submit <- function(req, pool, resolve, reject, error_call) {
   }
 
   on_fail <- function(msg) {
-    req_completed(req_prep)
+    complete()
 
     error_class <- setdiff(class(msg), "character")
     curl_error <- error_cnd(message = msg, class = error_class, call = NULL)

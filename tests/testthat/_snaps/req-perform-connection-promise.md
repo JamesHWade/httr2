@@ -32,3 +32,4 @@
       Error in `req_perform_connection_promise()`:
       ! Must supply `pool` when calling `later::with_temp_loop()`.
       i Do you need `pool = curl::new_pool()`?
+
