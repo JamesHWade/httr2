@@ -125,6 +125,59 @@ test_that("req_perform_promise can use non-default pool", {
   expect_equal(resp_status(p2_value), 200)
 })
 
+test_that("req_perform_promise wakes a sleeping pool for new requests", {
+  req1 <- request_test("/delay/:secs", secs = 2)
+  req2 <- request_test("/get")
+  pool <- curl::new_pool()
+
+  p1 <- req_perform_promise(req1, pool = pool)
+  withr::defer(extract_promise(p1, timeout = 5))
+  # Let curl establish the connection and start waiting for the slow response.
+  deadline <- as.double(Sys.time()) + 0.15
+  while (as.double(Sys.time()) < deadline) {
+    later::run_now(0.01)
+  }
+
+  p2 <- req_perform_promise(req2, pool = pool)
+  status <- NULL
+  promises::then(p2, function(resp) status <<- resp_status(resp))
+
+  # curl wakes the pool at least once a second (for its low-speed check), so
+  # waiting less than that shows the new request didn't wait for the old one.
+  deadline <- as.double(Sys.time()) + 0.5
+  while (is.null(status) && as.double(Sys.time()) < deadline) {
+    later::run_now(0.01)
+  }
+
+  expect_equal(status, 200)
+})
+
+test_that("req_perform_promise polls requests submitted by completion callbacks", {
+  pool <- curl::new_pool(multiplex = FALSE)
+  status <- NULL
+  handle <- curl::new_handle(url = example_url("/delay/0.2"))
+  curl::multi_add(handle, pool = pool, done = function(res) {
+    p <- req_perform_promise(request_test("/get"), pool = pool)
+    promises::then(p, function(resp) status <<- resp_status(resp))
+  })
+
+  extract_promise(req_perform_promise(request_test("/get"), pool = pool))
+  expect_equal(status, 200)
+})
+
+test_that("req_perform_promise restarts a poller whose loop was destroyed", {
+  pool <- curl::new_pool()
+  later::with_temp_loop({
+    req_perform_promise(request_test("/delay/:secs", secs = 0.2), pool = pool)
+  })
+
+  resp <- extract_promise(req_perform_promise(
+    request_test("/get"),
+    pool = pool
+  ))
+  expect_equal(resp_status(resp), 200)
+})
+
 test_that("req_perform_promise uses the default loop", {
   # The main reason for temp loops is to allow an asynchronous operation to be
   # created, waited on, and resolved/rejected inside of a synchronous function,
